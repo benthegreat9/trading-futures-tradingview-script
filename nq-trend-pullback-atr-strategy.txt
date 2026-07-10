@@ -1,0 +1,113 @@
+//@version=5
+
+// ---------------------------------------------------------------------------
+// Nasdaq (NQ/MNQ) Trend Pullback — ATR Risk Management
+//
+// No strategy has a guaranteed edge. This is built from well-documented,
+// non-curve-fit building blocks (trend filter, regime filter, volatility
+// filter, ATR-based risk) rather than an arbitrary indicator combo tuned to
+// one chart. Run it in the Strategy Tester over real historical data first,
+// then forward-test on paper trading for a meaningful sample size before
+// trusting it with money. Past performance does not predict future results.
+//
+// Logic:
+//   - Trend filter: only long above a rising 50/200 EMA stack, only short
+//     below a falling one.
+//   - Entry: price pulls back to the 20 EMA and reclaims it in the trend
+//     direction ("buy the dip" in an uptrend, mirrored for downtrends).
+//   - Regime filter: requires ADX >= adxMin so it skips choppy, non-trending
+//     stretches where pullback systems get whipsawed.
+//   - Volatility filter: requires ATR at/above its own 50-bar average, to
+//     skip dead/low-volatility grind.
+//   - Session filter: restricts entries to regular trading hours by default
+//     (overnight futures session is thinner and choppier).
+//   - Risk: ATR-based initial stop; trailing stop arms once price clears 1R
+//     of profit, then trails behind price at a wider ATR multiple.
+// ---------------------------------------------------------------------------
+
+strategy(title="NQ Trend Pullback (ATR Risk)", shorttitle="NQ Trend-PB", overlay=true,
+     initial_capital=5000, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=0, commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.62, slippage=1, process_orders_on_close=false)
+
+// ---- Inputs ----
+grpTrend = "Trend"
+emaFastLen = input.int(20,  "Pullback EMA",    group=grpTrend)
+emaMidLen  = input.int(50,  "Trend EMA (mid)",  group=grpTrend)
+emaSlowLen = input.int(200, "Trend EMA (slow)", group=grpTrend)
+
+grpFilter = "Filters"
+useAdxFilter = input.bool(true, "Require trending regime (ADX)", group=grpFilter)
+adxLen       = input.int(14, "ADX Length", group=grpFilter)
+adxMin       = input.float(20.0, "Minimum ADX", group=grpFilter)
+useVolFilter = input.bool(true, "Require normal-or-above volatility (ATR)", group=grpFilter)
+useSession   = input.bool(true, "Restrict to regular trading hours", group=grpFilter)
+sessionStr   = input.session("0930-1600", "RTH Session", group=grpFilter)
+sessionTz    = input.string("America/New_York", "Session Timezone", group=grpFilter)
+
+grpRisk = "Risk"
+atrLen       = input.int(14, "ATR Length", group=grpRisk)
+atrStopMult  = input.float(1.5, "Initial Stop (x ATR)", group=grpRisk)
+armRMult     = input.float(1.0, "Arm Trailing After (x Initial Risk)", group=grpRisk)
+trailAtrMult = input.float(2.0, "Trail Distance (x ATR)", group=grpRisk)
+
+grpDate = "Backtest Window"
+startDate = input.time(timestamp("2020-01-01T00:00:00"), "Start", group=grpDate)
+endDate   = input.time(timestamp("2099-01-01T00:00:00"), "End", group=grpDate)
+inWindow  = time >= startDate and time <= endDate
+
+// ---- Trend & filters ----
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+uptrend   = close > emaMid and emaMid > emaSlow
+downtrend = close < emaMid and emaMid < emaSlow
+
+[diplus, diminus, adx] = ta.dmi(adxLen, adxLen)
+adxOk = not useAdxFilter or adx >= adxMin
+
+atr    = ta.atr(atrLen)
+atrAvg = ta.sma(atr, 50)
+volOk  = not useVolFilter or atr >= atrAvg
+
+inSession = not useSession or not na(time(timeframe.period, sessionStr, sessionTz))
+
+// ---- Entry triggers ----
+longTrigger  = ta.crossover(close, emaFast)  and uptrend   and adxOk and volOk and inSession and inWindow
+shortTrigger = ta.crossunder(close, emaFast) and downtrend and adxOk and volOk and inSession and inWindow
+
+if longTrigger
+    strategy.entry("Long", strategy.long)
+if shortTrigger
+    strategy.entry("Short", strategy.short)
+
+// ---- Risk management ----
+// Set the exit order exactly ONCE per trade (armed on any position-direction
+// change), not every bar — recalculating strategy.exit() every bar over a
+// full backtest history blows past TradingView's 3000-orders-per-backtest
+// cap (RE10138). The trailing stop is then managed internally by the engine.
+var float posSignPrev = 0.0
+var bool  exitSet      = false
+
+posSign = math.sign(strategy.position_size)
+if posSign != posSignPrev
+    exitSet := false
+    posSignPrev := posSign
+
+if strategy.position_size != 0 and not exitSet
+    initRisk   = atr * atrStopMult
+    stopTicks  = initRisk / syminfo.mintick
+    armTicks   = initRisk * armRMult / syminfo.mintick
+    trailTicks = atr * trailAtrMult / syminfo.mintick
+    if strategy.position_size > 0
+        strategy.exit("Long Exit", from_entry="Long", loss=stopTicks, trail_points=armTicks, trail_offset=trailTicks)
+    else
+        strategy.exit("Short Exit", from_entry="Short", loss=stopTicks, trail_points=armTicks, trail_offset=trailTicks)
+    exitSet := true
+
+// ---- Visuals ----
+plot(emaFast, "EMA Fast (pullback)", color=color.aqua)
+plot(emaMid,  "EMA Mid (trend)",     color=color.orange)
+plot(emaSlow, "EMA Slow (trend)",    color=color.white, linewidth=2)
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na)
