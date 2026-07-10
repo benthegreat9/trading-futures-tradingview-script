@@ -53,27 +53,30 @@ if inWindow
     if goShort
         strategy.entry("Short", strategy.short)
 
-// 10-point trailing stop: while a position is at/above (long) or at/below (short)
-// its entry price, the stop trails the current close; while underwater it freezes
-// at its last computed level. Mirrors stoploss_in/stoploss_out in the original.
-var float longStop  = na
-var float shortStop = na
+// 10-point trailing stop. NOTE: this is set ONCE per trade (native trail_points/
+// trail_offset), not recalculated every bar like the original's stoploss_in/
+// stoploss_out — recomputing + reissuing strategy.exit() on every single 5-minute
+// bar across the full backtest history blows past TradingView's 3000-order-per-
+// backtest cap (RE10138). The engine now trails the stop internally instead.
+// Difference from the original: this stop arms immediately at entry, rather than
+// only after price first closes back at/above the entry price.
+trailOffsetTicks = trailPts / syminfo.mintick
+
+var bool longExitSet  = false
+var bool shortExitSet = false
 
 if strategy.position_size > 0
-    if close >= strategy.position_avg_price
-        longStop := close - trailPts
-    strategy.exit("Long Exit", from_entry="Long", stop=longStop)
+    if not longExitSet
+        strategy.exit("Long Exit", from_entry="Long", trail_points=0, trail_offset=trailOffsetTicks)
+        longExitSet := true
 else
-    longStop := na
+    longExitSet := false
 
 if strategy.position_size < 0
-    if close <= strategy.position_avg_price
-        shortStop := close + trailPts
-    strategy.exit("Short Exit", from_entry="Short", stop=shortStop)
+    if not shortExitSet
+        strategy.exit("Short Exit", from_entry="Short", trail_points=0, trail_offset=trailOffsetTicks)
+        shortExitSet := true
 else
-    shortStop := na
-
-plot(strategy.position_size > 0 ? longStop  : na, title="Long Trailing Stop",  color=color.green, style=plot.style_circles, linewidth=2)
-plot(strategy.position_size < 0 ? shortStop : na, title="Short Trailing Stop", color=color.red,   style=plot.style_circles, linewidth=2)
+    shortExitSet := false
 
 bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na)
