@@ -1,0 +1,79 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=5
+
+// ---------------------------------------------------------------------------
+// Backtestable port of trade-futures.txt ("Snag - Auto Trade Futures").
+//
+// The original file is an *indicator* (alerts + labels only, no strategy.*
+// calls), so TradingView's Strategy Tester can't run it. This keeps only the
+// logic that actually produced the IN/OUT (long/short) signals in that
+// script — the WMA200-distance ("point") breakout/breakdown reversal system
+// plus its 10-point trailing stop — and wires it to strategy.entry /
+// strategy.exit. All the cosmetic labels, tables, and support/resistance
+// drawing from the original (which never fed the actual signal) were
+// dropped.
+//
+// Usage:
+//   1. Add to a 5-minute chart of MNQU2026 (or MNQ1!/NQ1!).
+//   2. Open the "Strategy Tester" tab for win rate / P&L / drawdown / trades.
+//   3. README's stated params: NQ IN=15/OUT=12 (or IN=8/OUT=5), ES IN=5/OUT=3.
+// ---------------------------------------------------------------------------
+
+strategy(title="Snag Trade-Futures — Backtest", shorttitle="Snag BT", overlay=true,
+     initial_capital=5000, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=0, commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.62, slippage=1, process_orders_on_close=false)
+
+input_in  = input.float(15.0, title="Input In Point (long trigger)")
+input_out = input.float(12.0, title="Input Out Point (short trigger)")
+trailPts  = input.float(10.0, title="Trailing Stop (points)")
+startDate = input.time(timestamp("2020-01-01T00:00:00"), title="Backtest Start")
+endDate   = input.time(timestamp("2099-01-01T00:00:00"), title="Backtest End")
+
+inWindow = time >= startDate and time <= endDate
+
+wma13  = ta.wma(close, 13)
+wma48  = ta.wma(close, 48)
+wma200 = ta.wma(close, 200)
+plot(wma13,  title="WMA13",  color=color.blue)
+plot(wma48,  title="WMA48",  color=color.yellow)
+plot(wma200, title="WMA200", color=color.white, linewidth=2)
+
+// Distance of close from WMA200, ceiling-rounded — matches f_RoundUp(close - wma200, 0) in the original.
+point  = math.ceil(close - wma200)
+point1 = point[1]
+point2 = point[2]
+
+goLong  = (point - point1 > input_in)  or (point - point2 > input_in)
+goShort = (point1 - point > input_out) or (point2 - point > input_out)
+
+if inWindow
+    if goLong
+        strategy.entry("Long", strategy.long)
+    if goShort
+        strategy.entry("Short", strategy.short)
+
+// 10-point trailing stop: while a position is at/above (long) or at/below (short)
+// its entry price, the stop trails the current close; while underwater it freezes
+// at its last computed level. Mirrors stoploss_in/stoploss_out in the original.
+var float longStop  = na
+var float shortStop = na
+
+if strategy.position_size > 0
+    if close >= strategy.position_avg_price
+        longStop := close - trailPts
+    strategy.exit("Long Exit", from_entry="Long", stop=longStop)
+else
+    longStop := na
+
+if strategy.position_size < 0
+    if close <= strategy.position_avg_price
+        shortStop := close + trailPts
+    strategy.exit("Short Exit", from_entry="Short", stop=shortStop)
+else
+    shortStop := na
+
+plot(strategy.position_size > 0 ? longStop  : na, title="Long Trailing Stop",  color=color.green, style=plot.style_circles, linewidth=2)
+plot(strategy.position_size < 0 ? shortStop : na, title="Short Trailing Stop", color=color.red,   style=plot.style_circles, linewidth=2)
+
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na)
