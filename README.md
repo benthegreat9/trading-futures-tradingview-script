@@ -231,6 +231,26 @@ Using indicator `swing.txt` to exit or entry CALL PUT
 ![Alt text](https://github.com/dearvn/trading-futures-tradingview-script/raw/main/alert.png?raw=true "Alert")
 
 
+## NQ Adaptive Regime Strategy (auto-picks the best playbook for the current market)
+
+File: `nq-adaptive-regime-strategy.txt`
+Timeframe: **5M** (works on NQ1!/MNQ1!, also ES1!/MES1!)
+
+Instead of running one fixed strategy, this script first classifies what the market is currently doing, then switches to whichever proven playbook fits that condition:
+
+* **ADX** decides *trending* vs *ranging/choppy*
+* **ATR percentile** flags *extreme volatility* (news spikes/crashes) so the strategy stands aside
+* **Opening Range Breakout** (first 15 min of the session) always takes priority when it fires, since it's the highest-edge NQ/ES setup at the open
+
+| Regime detected | Playbook used |
+|---|---|
+| Opening range breaks out | **Opening Range Breakout (ORB)** |
+| ADX >= threshold (trending) | **Trend-Following** — EMA(9/21) cross confirmed by SuperTrend |
+| ADX < threshold (ranging/chop) | **Mean-Reversion** — Bollinger Band + RSI fade back to the mean |
+| ATR percentile extreme | **Stand aside** — no new trades |
+
+All trades share the same ATR-based stop/target risk management, and entries/exits fire `alert_message` JSON compatible with the Tradovate webhook flow described above. A live dashboard (top-right table) shows the current regime, ADX, ATR percentile, and which playbook is active. Every input (ADX threshold, EMA lengths, BB/RSI settings, ORB window, ATR multiples) is exposed so it can be tuned/backtested per contract.
+
 # trading-futures-tradingview-script
 I write pine script to trading futures ES1 NQ1 with signal IN (accurate 90%) and now I am trading on that
 ## Logic to trade futures

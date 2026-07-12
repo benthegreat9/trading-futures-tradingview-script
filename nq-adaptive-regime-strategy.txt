@@ -1,0 +1,231 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=5
+// ============================================================================
+// NQ ADAPTIVE REGIME STRATEGY
+// Detects what the market is currently doing (trending / ranging / choppy /
+// extreme volatility) and switches between three well-known, independently
+// profitable NQ futures playbooks instead of running one strategy blind:
+//
+//   1) TREND-FOLLOWING   -> EMA(9/21) cross confirmed by SuperTrend, used
+//                            when ADX shows a real trend.
+//   2) MEAN-REVERSION     -> Bollinger Band + RSI fade, used when ADX shows
+//                            no trend (range/chop).
+//   3) OPENING RANGE BREAKOUT (ORB) -> breakout of the first N minutes of
+//                            the session, the highest-edge NQ/ES setup at
+//                            the open, takes priority whenever it fires.
+//
+// A volatility filter (ATR percentile) stands the strategy aside during
+// blow-off / crash conditions where none of the above have edge.
+//
+// Default timeframe: 5M on NQ1!/MNQ1! (also works on ES1!, MES1!).
+// ============================================================================
+strategy(title="NQ Adaptive Regime Strategy", shorttitle="NQ-Adaptive", overlay=true,
+     initial_capital=25000, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=0, calc_on_every_tick=false, commission_type=strategy.commission.cash_per_contract,
+     commission_value=1.5, slippage=1)
+
+// ---------------------------------------------------------------------------
+// REGIME DETECTION
+// ---------------------------------------------------------------------------
+grpRegime = "Regime Detection"
+adxLen       = input.int(14, "ADX Length", group=grpRegime)
+adxTrendTh   = input.float(20, "ADX Trend Threshold (>= = trending)", group=grpRegime)
+atrLen       = input.int(14, "ATR Length", group=grpRegime)
+atrLookback  = input.int(100, "ATR Percentile Lookback", group=grpRegime)
+volHighPct   = input.float(90, "Extreme Volatility Percentile (stand aside)", group=grpRegime)
+
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxLen)
+atr        = ta.atr(atrLen)
+atrRank    = ta.percentrank(atr, atrLookback)
+isTrending   = adx >= adxTrendTh
+isExtremeVol = atrRank >= volHighPct
+
+regime = isExtremeVol ? "EXTREME VOL" : isTrending ? "TRENDING" : "RANGING/CHOP"
+
+// ---------------------------------------------------------------------------
+// STRATEGY TOGGLES
+// ---------------------------------------------------------------------------
+grpStrat   = "Strategy Toggles"
+useTrend   = input.bool(true, "Enable Trend-Following (trending regime)", group=grpStrat)
+useMeanRev = input.bool(true, "Enable Mean-Reversion (ranging regime)", group=grpStrat)
+useORB     = input.bool(true, "Enable Opening Range Breakout (session open, takes priority)", group=grpStrat)
+useVolStop = input.bool(true, "Stand aside on extreme volatility", group=grpStrat)
+
+// ---------------------------------------------------------------------------
+// TREND-FOLLOWING (EMA cross + SuperTrend confirmation)
+// ---------------------------------------------------------------------------
+grpTrend = "Trend-Following Settings"
+fastLen  = input.int(9, "Fast EMA", group=grpTrend)
+slowLen  = input.int(21, "Slow EMA", group=grpTrend)
+stFactor = input.float(3.0, "SuperTrend Factor", group=grpTrend)
+stATRLen = input.int(10, "SuperTrend ATR Length", group=grpTrend)
+
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+[supertrend, stDir] = ta.supertrend(stFactor, stATRLen)
+
+trendLong  = emaFast > emaSlow and stDir < 0
+trendShort = emaFast < emaSlow and stDir > 0
+
+// ---------------------------------------------------------------------------
+// MEAN-REVERSION (Bollinger Band + RSI fade)
+// ---------------------------------------------------------------------------
+grpMR  = "Mean-Reversion Settings"
+bbLen  = input.int(20, "Bollinger Length", group=grpMR)
+bbMult = input.float(2.0, "Bollinger Mult", group=grpMR)
+rsiLen = input.int(14, "RSI Length", group=grpMR)
+rsiOB  = input.int(70, "RSI Overbought", group=grpMR)
+rsiOS  = input.int(30, "RSI Oversold", group=grpMR)
+
+basis   = ta.sma(close, bbLen)
+dev     = bbMult * ta.stdev(close, bbLen)
+upperBB = basis + dev
+lowerBB = basis - dev
+rsi     = ta.rsi(close, rsiLen)
+
+mrLong  = close <= lowerBB and rsi <= rsiOS
+mrShort = close >= upperBB and rsi >= rsiOB
+mrExitLong  = close >= basis
+mrExitShort = close <= basis
+
+plot(basis, "BB Basis", color=color.new(color.gray, 60), display=display.none)
+plot(upperBB, "BB Upper", color=color.new(color.gray, 60), display=display.none)
+plot(lowerBB, "BB Lower", color=color.new(color.gray, 60), display=display.none)
+
+// ---------------------------------------------------------------------------
+// OPENING RANGE BREAKOUT (highest priority signal)
+// ---------------------------------------------------------------------------
+grpORB       = "Opening Range Breakout Settings"
+sessionStart = input.session("0930-0945", "Opening Range Window (exchange time)", group=grpORB)
+orbTZ        = input.string("America/New_York", "Session Timezone", group=grpORB)
+
+sessionActive  = not na(time(timeframe.period, sessionStart, orbTZ))
+sessionStartBar = sessionActive and not sessionActive[1]
+sessionEndBar   = not sessionActive and sessionActive[1]
+
+var float orHigh = na
+var float orLow  = na
+var bool  orbReady     = false
+var bool  orbLongDone  = false
+var bool  orbShortDone = false
+
+if sessionStartBar
+    orHigh := high
+    orLow := low
+    orbReady := false
+    orbLongDone := false
+    orbShortDone := false
+else if sessionActive
+    orHigh := math.max(orHigh, high)
+    orLow := math.min(orLow, low)
+
+if sessionEndBar
+    orbReady := true
+
+orbLongTrigger  = orbReady and not orbLongDone and not orbShortDone and close > orHigh
+orbShortTrigger = orbReady and not orbLongDone and not orbShortDone and close < orLow
+
+if orbLongTrigger
+    orbLongDone := true
+if orbShortTrigger
+    orbShortDone := true
+
+plot(orbReady ? orHigh : na, "Opening Range High", color=color.new(color.teal, 40), style=plot.style_linebr)
+plot(orbReady ? orLow : na, "Opening Range Low", color=color.new(color.orange, 40), style=plot.style_linebr)
+
+// ---------------------------------------------------------------------------
+// RISK MANAGEMENT (shared ATR stop / target across all sub-strategies)
+// ---------------------------------------------------------------------------
+grpRisk       = "Risk Management"
+atrStopMult   = input.float(1.5, "ATR Stop Multiple", group=grpRisk)
+atrTargetMult = input.float(3.0, "ATR Target Multiple", group=grpRisk)
+
+atrStopDist = atr * atrStopMult
+
+// ---------------------------------------------------------------------------
+// STRATEGY SELECTOR — pick exactly one playbook per bar based on regime
+// ---------------------------------------------------------------------------
+var string activeStrategy = "NONE"
+longSignal  = false
+shortSignal = false
+
+if useORB and orbLongTrigger
+    longSignal := true
+    activeStrategy := "ORB"
+else if useORB and orbShortTrigger
+    shortSignal := true
+    activeStrategy := "ORB"
+else if useVolStop and isExtremeVol
+    activeStrategy := "STAND ASIDE (extreme vol)"
+else if useTrend and isTrending
+    if trendLong
+        longSignal := true
+        activeStrategy := "TREND-FOLLOWING"
+    else if trendShort
+        shortSignal := true
+        activeStrategy := "TREND-FOLLOWING"
+else if useMeanRev and not isTrending
+    if mrLong
+        longSignal := true
+        activeStrategy := "MEAN-REVERSION"
+    else if mrShort
+        shortSignal := true
+        activeStrategy := "MEAN-REVERSION"
+
+// ---------------------------------------------------------------------------
+// EXECUTION
+// ---------------------------------------------------------------------------
+if longSignal and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long, alert_message='{"action":"buy","symbol":"{{ticker}}","qty":1,"price":{{close}}}')
+
+if shortSignal and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short, alert_message='{"action":"sell","symbol":"{{ticker}}","qty":1,"price":{{close}}}')
+
+// Regime-aware early exits: bail out of a mean-reversion trade once price
+// reverts to the mean, and bail out of a trend trade once the trend dies.
+if strategy.position_size > 0
+    if activeStrategy == "MEAN-REVERSION" and mrExitLong
+        strategy.close("Long", comment="MR target", alert_message='{"action":"closeLong","symbol":"{{ticker}}"}')
+    else if activeStrategy == "TREND-FOLLOWING" and stDir > 0
+        strategy.close("Long", comment="Trend flip", alert_message='{"action":"closeLong","symbol":"{{ticker}}"}')
+
+if strategy.position_size < 0
+    if activeStrategy == "MEAN-REVERSION" and mrExitShort
+        strategy.close("Short", comment="MR target", alert_message='{"action":"closeShort","symbol":"{{ticker}}"}')
+    else if activeStrategy == "TREND-FOLLOWING" and stDir < 0
+        strategy.close("Short", comment="Trend flip", alert_message='{"action":"closeShort","symbol":"{{ticker}}"}')
+
+// Shared ATR stop/target backstop on every open position, regardless of regime
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+         stop=strategy.position_avg_price - atrStopDist,
+         limit=strategy.position_avg_price + atrStopDist * atrTargetMult,
+         alert_message='{"action":"closeLong","symbol":"{{ticker}}"}')
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+         stop=strategy.position_avg_price + atrStopDist,
+         limit=strategy.position_avg_price - atrStopDist * atrTargetMult,
+         alert_message='{"action":"closeShort","symbol":"{{ticker}}"}')
+
+alertcondition(longSignal, title="Adaptive BUY", message='{"action":"buy","symbol":"{{ticker}}","qty":1,"price":{{close}}}')
+alertcondition(shortSignal, title="Adaptive SELL", message='{"action":"sell","symbol":"{{ticker}}","qty":1,"price":{{close}}}')
+
+// ---------------------------------------------------------------------------
+// VISUALS — background regime color + live dashboard
+// ---------------------------------------------------------------------------
+bgColor = isExtremeVol ? color.new(color.purple, 90) : isTrending ? color.new(color.blue, 92) : color.new(color.yellow, 92)
+bgcolor(bgColor, title="Regime Background")
+
+var table dash = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast
+    table.cell(dash, 0, 0, "Regime", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 0, regime, bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 0, 1, "Active Strategy")
+    table.cell(dash, 1, 1, activeStrategy)
+    table.cell(dash, 0, 2, "ADX")
+    table.cell(dash, 1, 2, str.tostring(adx, "#.##"))
+    table.cell(dash, 0, 3, "ATR Percentile")
+    table.cell(dash, 1, 3, str.tostring(atrRank, "#.##"))
+    table.cell(dash, 0, 4, "Position")
+    table.cell(dash, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT")
